@@ -1,0 +1,24 @@
+# Virtual environment
+.venv/
+
+# Generated data
+data/
+
+# Model checkpoints
+checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+
+# OS
+.DS_Store

@@ -1,0 +1,239 @@
+"""Run the full CoT vs TIR experiment on Modal Labs.
+
+Mirrors run_experiment.py but executes training and evaluation on a Modal GPU.
+Small result files (experiment.log, results JSONL, trajectories) are downloaded
+to the local output_dir. Model checkpoints remain in the 'tir-experiments'
+Modal Volume and can be retrieved later with:
+    modal volume get tir-experiments <experiment_name>/cot/final ./local_path
+
+Usage
+-----
+modal run scripts/run_experiment_modal.py \\
+    --dataset gsm8k \\
+    --n 500 \\
+    --tir-data-path data/tir_gsm8k_1000.jsonl \\
+    --output-dir results/exp_gsm8k_n500 \\
+    --wandb-project tir-experiments
+
+Note: Modal converts Python parameter underscores to hyphens in the CLI,
+so --tir_data_path becomes --tir-data-path, --output_dir becomes --output-dir, etc.
+
+W&B note: to enable W&B logging, create a Modal secret named "wandb" containing
+WANDB_API_KEY, uncomment the `secrets` line in @app.function, and pass
+--wandb-project.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import modal
+
+# ---------------------------------------------------------------------------
+# Image + volumes
+# ---------------------------------------------------------------------------
+
+APP_NAME        = "tir-experiment"
+HF_CACHE        = "/vol/hf_cache"
+EXPERIMENTS_DIR = "/vol/experiments"
+
+_root       = Path(__file__).resolve().parent.parent
+_src_dir    = _root / "src"
+_scripts_dir = Path(__file__).resolve().parent
+
+hf_vol          = modal.Volume.from_name("tir-hf-cache",    create_if_missing=True)
+experiments_vol = modal.Volume.from_name("tir-experiments", create_if_missing=True)
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "torch==2.4.1",
+        "transformers>=4.45.0",
+        "accelerate>=0.34.0",
+        "datasets>=2.20.0",
+        "sympy>=1.13.0",
+        "tqdm",
+        "huggingface_hub>=0.24.0",
+        "wandb>=0.17.0",
+    )
+    .add_local_dir(_src_dir,     remote_path="/root/src")
+    .add_local_dir(_scripts_dir, remote_path="/root/scripts")
+)
+
+app = modal.App(APP_NAME, image=image)
+
+
+# ---------------------------------------------------------------------------
+# Remote function
+# ---------------------------------------------------------------------------
+
+@app.function(
+    gpu="A10G",
+    volumes={
+        HF_CACHE:        hf_vol,
+        EXPERIMENTS_DIR: experiments_vol,
+    },
+    timeout=14400,   # 4 hours
+    # secrets=[modal.Secret.from_name("wandb")],  # uncomment for W&B logging
+)
+def run_experiment_fn(
+    experiment_name: str,
+    dataset: str,
+    tir_data: str,           # JSONL file contents (passed from local machine)
+    cli_args: list[str],     # forwarded verbatim to run_experiment.py
+) -> dict[str, str]:         # {relative_path: file_content} for small result files
+    import os
+    import subprocess
+
+    os.environ["HF_HOME"] = HF_CACHE
+    os.chdir("/root")   # scripts/train_cot.py etc. are at /root/scripts/
+
+    # Write TIR data to the experiments volume so run_experiment.py can read it
+    exp_dir      = Path(EXPERIMENTS_DIR) / experiment_name
+    tir_data_path = exp_dir / "tir_data.jsonl"
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    tir_data_path.write_text(tir_data)
+    experiments_vol.commit()
+
+    cmd = [
+        sys.executable, "scripts/run_experiment.py",
+        "--tir_data_path", str(tir_data_path),
+        "--output_dir",    str(exp_dir),
+    ] + cli_args
+
+    subprocess.run(cmd, check=True)
+    experiments_vol.commit()
+
+    # Return small result files to the local machine.
+    # Checkpoints (cot/final/, tir/final/) are large — they stay in the Volume.
+    _RESULT_PATHS = [
+        "experiment.log",
+        f"results/cot/final_{dataset}.jsonl",
+        f"results/tir/final_{dataset}.jsonl",
+        "trajectories/cot_correct.jsonl",
+        "trajectories/cot_incorrect.jsonl",
+        "trajectories/tir_correct.jsonl",
+        "trajectories/tir_incorrect.jsonl",
+    ]
+    results: dict[str, str] = {}
+    for rel in _RESULT_PATHS:
+        path = exp_dir / rel
+        if path.exists():
+            results[rel] = path.read_text()
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoint
+# ---------------------------------------------------------------------------
+
+# Pass-through args are forwarded to run_experiment.py unchanged.
+# --tir_data_path and --output_dir are handled here (not forwarded).
+
+@app.local_entrypoint()
+def main(
+    dataset:          str   = "gsm8k",
+    n:                int   = 500,
+    tir_data_path:    str   = "data/tir_gsm8k_1000.jsonl",
+    output_dir:       str   = "results/exp",
+    seed:             int   = 42,
+    # Training
+    epochs:           int   = 1,
+    batch_size:       int   = 2,
+    lr:               float = 2e-5,
+    warmup_frac:      float = 0.03,
+    grad_accum:       int   = 4,
+    grad_clip:        float = 1.0,
+    max_length:       int   = 2048,
+    log_every:        int   = 10,
+    # Evaluation
+    eval_batch_size:  int   = 8,
+    eval_max_tokens:  int   = 1024,
+    eval_limit:       int   = 0,    # 0 = no limit
+    # Control flow
+    skip_cot_train:   bool  = False,
+    skip_tir_train:   bool  = False,
+    skip_eval:        bool  = False,
+    # W&B (requires the "wandb" Modal secret — see file header)
+    wandb_project:    str   = "",
+) -> None:
+    # ------------------------------------------------------------------
+    # Read TIR data locally and pass to the container
+    # ------------------------------------------------------------------
+    tir_path = Path(tir_data_path)
+    if not tir_path.exists():
+        raise FileNotFoundError(f"TIR data file not found: {tir_path}")
+    tir_data = tir_path.read_text()
+
+    # ------------------------------------------------------------------
+    # Build the experiment name and CLI args list
+    # ------------------------------------------------------------------
+    experiment_name = f"{dataset}_n{n}_ep{epochs}_lr{lr:.0e}"
+
+    cli_args: list[str] = [
+        "--dataset",      dataset,
+        "--n",            str(n),
+        "--seed",         str(seed),
+        "--epochs",       str(epochs),
+        "--batch_size",   str(batch_size),
+        "--lr",           str(lr),
+        "--warmup_frac",  str(warmup_frac),
+        "--grad_accum",   str(grad_accum),
+        "--grad_clip",    str(grad_clip),
+        "--max_length",   str(max_length),
+        "--log_every",    str(log_every),
+        "--eval_batch_size", str(eval_batch_size),
+        "--eval_max_tokens", str(eval_max_tokens),
+    ]
+    if eval_limit:
+        cli_args += ["--eval_limit", str(eval_limit)]
+    if skip_cot_train:
+        cli_args.append("--skip_cot_train")
+    if skip_tir_train:
+        cli_args.append("--skip_tir_train")
+    if skip_eval:
+        cli_args.append("--skip_eval")
+    if wandb_project:
+        cli_args += ["--wandb_project", wandb_project]
+
+    print(f"Launching experiment '{experiment_name}' on Modal (gpu=A10G, timeout=4h)")
+    print(f"TIR data: {tir_data_path} ({len(tir_data.splitlines())} lines)")
+
+    # ------------------------------------------------------------------
+    # Run on Modal
+    # ------------------------------------------------------------------
+    result_files = run_experiment_fn.remote(
+        experiment_name=experiment_name,
+        dataset=dataset,
+        tir_data=tir_data,
+        cli_args=cli_args,
+    )
+
+    # ------------------------------------------------------------------
+    # Write results to local disk
+    # ------------------------------------------------------------------
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    for rel_path, content in result_files.items():
+        dest = out / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content)
+        print(f"  Downloaded → {dest}")
+
+    # Print the comparison table from the log (last section after final ===)
+    log_content = result_files.get("experiment.log", "")
+    if log_content:
+        lines = log_content.splitlines()
+        # Find the last occurrence of the RESULTS header
+        last_results = max(
+            (i for i, l in enumerate(lines) if "RESULTS" in l and "===" in lines[i - 1]),
+            default=None,
+        )
+        if last_results is not None:
+            print("\n" + "\n".join(lines[last_results - 1:]))
+
+    print(f"\nCheckpoints remain in Modal Volume 'tir-experiments' under '{experiment_name}/'")
+    print(f"Retrieve with: modal volume get tir-experiments {experiment_name}/cot/final <local_path>")
