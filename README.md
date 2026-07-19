@@ -82,9 +82,11 @@ TIR achieves a **28% relative improvement** over CoT on the same model, training
 
 **CoT** (correct) — the model reasons entirely in natural language:
 
-> *Problem: Tracy used a piece of wire 4 feet long to support tomato plants. The wire was cut into pieces 6 inches long. How many pieces did she obtain?*
+> *Problem: Tracy used a piece of wire 4 feet long to support tomato plants in the garden. The wire was cut into pieces 6 inches long. How many pieces did she obtain?*
 >
-> "There are 12 inches in 1 foot, so 4 feet is 4×12 = 48 inches. The wire was cut into pieces 6 inches long, so Tracy obtained 48/6 = 8 pieces. `#### 8`"
+> There are 12 inches in 1 foot, so 4 feet is 4\*12 = \<\<4\*12=48\>\>48 inches.
+> The wire was cut into pieces 6 inches long, so Tracy obtained 48/6 = \<\<48/6=8\>\>8 pieces.
+> `#### 8`
 
 ## Project Structure
 
