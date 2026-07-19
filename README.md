@@ -76,9 +76,27 @@ TIR achieves a **28% relative improvement** over CoT on the same model, training
 
 **TIR** (correct) — the model writes and executes code to compute the answer:
 
-> *Problem: Marie ordered one chicken meal that costs \$12, 5 packs of milk that costs \$3 each, 4 apples that cost \$1.50 each, and some boxes of pizza. Marie paid a total of \$50. How many boxes of pizza did Marie order if each box costs \$8.50?*
+> *Problem: Marilyn's first record sold 10 times as many copies as Harald's. If they sold 88,000 copies combined, how many copies did Harald sell?*
 >
-> The model sets up variables for each item, computes total known costs in Python, subtracts from \$50, and divides by \$8.50 to get `2.0`. Final answer: `\boxed{2}`.
+> To solve this problem, we can set up an equation based on the information given. Let's denote the number of copies Harald sold as H. According to the problem, Marilyn sold 10 times as many copies as Harald, so Marilyn sold 10H copies. Together, they sold 88,000 copies, so we can write the equation:
+>
+> H + 10H = 88000
+>
+> This simplifies to:
+>
+> 11H = 88000
+>
+> Let's calculate this value using Python to ensure accuracy.
+> ```python
+> total_copies = 88000
+> ratio = 10
+> copies_harald = total_copies / (1 + ratio)
+> print(copies_harald)
+> ```
+> ```
+> 8000.0
+> ```
+> The number of copies Harald sold is **8000**.
 
 **CoT** (correct) — the model reasons entirely in natural language:
 
