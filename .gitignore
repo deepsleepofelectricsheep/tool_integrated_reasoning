@@ -21,5 +21,8 @@ build/
 # Environment
 .env
 
+# PDFs
+*.pdf
+
 # OS
 .DS_Store
