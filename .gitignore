@@ -3,6 +3,7 @@
 
 # Generated data
 data/
+*.jsonl
 
 # Model checkpoints
 checkpoints/

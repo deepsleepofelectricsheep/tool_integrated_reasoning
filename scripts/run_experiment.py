@@ -161,11 +161,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb_project", type=str, default=None,
                    help="W&B project name; omit to disable W&B logging")
 
+    # Output Space Shaping (OSS)
+    p.add_argument("--oss",              action="store_true",
+                   help="Enable TIR+OSS arm (3-way comparison)")
+    p.add_argument("--oss_num_samples",  type=int, default=5,
+                   help="Candidate trajectories per problem for OSS")
+    p.add_argument("--oss_temperature",  type=float, default=0.8)
+    p.add_argument("--oss_top_p",        type=float, default=0.95)
+
     # Control flow
     p.add_argument("--skip_cot_train", action="store_true",
                    help="Skip CoT training (use existing checkpoint)")
     p.add_argument("--skip_tir_train", action="store_true",
                    help="Skip TIR training (use existing checkpoint)")
+    p.add_argument("--skip_oss_gen",   action="store_true",
+                   help="Skip OSS data generation (use existing merged JSONL)")
+    p.add_argument("--skip_oss_train", action="store_true",
+                   help="Skip TIR+OSS training (use existing checkpoint)")
     p.add_argument("--skip_eval",      action="store_true",
                    help="Skip evaluation")
 
@@ -199,15 +211,22 @@ def main() -> None:
 def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file) -> None:
     cot_ckpt    = root / "cot" / "final"
     tir_ckpt    = root / "tir" / "final"
+    oss_ckpt    = root / "tir_oss" / "final"
     cot_results = root / "results" / "cot"
     tir_results = root / "results" / "tir"
+    oss_results = root / "results" / "tir_oss"
     traj_dir    = root / "trajectories"
+    oss_data    = root / "tir_oss_data.jsonl"
 
+    total_steps = 7 if args.oss else 4
     group = f"{args.dataset}_n{args.n}_ep{args.epochs}_lr{args.lr:.0e}"
 
     print(f"Experiment: {group}")
     print(f"Output dir: {root}")
     print(f"Log file  : {root / 'experiment.log'}")
+    if args.oss:
+        print(f"OSS:        enabled (num_samples={args.oss_num_samples}, "
+              f"temp={args.oss_temperature}, top_p={args.oss_top_p})")
 
     shared_train = [
         "--epochs",      str(args.epochs),
@@ -236,12 +255,15 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
     if args.wandb_project:
         shared_eval += ["--wandb_project", args.wandb_project, "--wandb_group", group]
 
+    step = 0
+
     # ------------------------------------------------------------------
     # 1. Train CoT
     # ------------------------------------------------------------------
+    step += 1
     if not args.skip_cot_train:
         print(f"\n{'='*60}")
-        print(f"STEP 1 / 4 — Train CoT  (n={args.n}, epochs={args.epochs})")
+        print(f"STEP {step} / {total_steps} — Train CoT  (n={args.n}, epochs={args.epochs})")
         print(f"{'='*60}")
         run([
             python, "scripts/train_cot.py",
@@ -255,9 +277,10 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
     # ------------------------------------------------------------------
     # 2. Train TIR
     # ------------------------------------------------------------------
+    step += 1
     if not args.skip_tir_train:
         print(f"\n{'='*60}")
-        print(f"STEP 2 / 4 — Train TIR  (n={args.n}, epochs={args.epochs})")
+        print(f"STEP {step} / {total_steps} — Train TIR  (n={args.n}, epochs={args.epochs})")
         print(f"{'='*60}")
         run([
             python, "scripts/train_tir.py",
@@ -268,14 +291,55 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
     else:
         print(f"\nSkipping TIR training — using checkpoint at {tir_ckpt}")
 
+    # ------------------------------------------------------------------
+    # 3-4. OSS: Generate augmented data + Train TIR+OSS
+    # ------------------------------------------------------------------
+    if args.oss:
+        step += 1
+        if not args.skip_oss_gen:
+            print(f"\n{'='*60}")
+            print(f"STEP {step} / {total_steps} — Generate OSS data  "
+                  f"(num_samples={args.oss_num_samples})")
+            print(f"{'='*60}")
+            run([
+                python, "scripts/generate_oss.py",
+                "--model",         str(tir_ckpt),
+                "--dataset",       args.dataset,
+                "--n",             str(args.n),
+                "--num_samples",   str(args.oss_num_samples),
+                "--temperature",   str(args.oss_temperature),
+                "--top_p",         str(args.oss_top_p),
+                "--seed",          str(args.seed),
+                "--base_tir_data", args.tir_data_path,
+                "--output_path",   str(oss_data),
+            ])
+        else:
+            print(f"\nSkipping OSS generation — using existing data at {oss_data}")
+
+        step += 1
+        if not args.skip_oss_train:
+            print(f"\n{'='*60}")
+            print(f"STEP {step} / {total_steps} — Train TIR+OSS  "
+                  f"(n={args.n}, epochs={args.epochs})")
+            print(f"{'='*60}")
+            run([
+                python, "scripts/train_tir.py",
+                "--data_path",      str(oss_data),
+                "--output_dir",     str(root / "tir_oss"),
+                "--wandb_run_name", "tir_oss_train",
+            ] + shared_train)
+        else:
+            print(f"\nSkipping TIR+OSS training — using checkpoint at {oss_ckpt}")
+
     if args.skip_eval:
         return
 
     # ------------------------------------------------------------------
-    # 3. Evaluate CoT
+    # Evaluate CoT
     # ------------------------------------------------------------------
+    step += 1
     print(f"\n{'='*60}")
-    print(f"STEP 3 / 4 — Evaluate CoT")
+    print(f"STEP {step} / {total_steps} — Evaluate CoT")
     print(f"{'='*60}")
     run([
         python, "scripts/evaluate.py",
@@ -287,10 +351,11 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
     ] + shared_eval)
 
     # ------------------------------------------------------------------
-    # 4. Evaluate TIR
+    # Evaluate TIR
     # ------------------------------------------------------------------
+    step += 1
     print(f"\n{'='*60}")
-    print(f"STEP 4 / 4 — Evaluate TIR")
+    print(f"STEP {step} / {total_steps} — Evaluate TIR")
     print(f"{'='*60}")
     run([
         python, "scripts/evaluate.py",
@@ -300,6 +365,23 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
         "--output_dir",     str(tir_results),
         "--wandb_run_name", "tir_eval",
     ] + shared_eval)
+
+    # ------------------------------------------------------------------
+    # Evaluate TIR+OSS
+    # ------------------------------------------------------------------
+    if args.oss:
+        step += 1
+        print(f"\n{'='*60}")
+        print(f"STEP {step} / {total_steps} — Evaluate TIR+OSS")
+        print(f"{'='*60}")
+        run([
+            python, "scripts/evaluate.py",
+            "--model",          str(oss_ckpt),
+            "--answer_format",  "boxed",
+            "--prompt_format",  "tir",
+            "--output_dir",     str(oss_results),
+            "--wandb_run_name", "tir_oss_eval",
+        ] + shared_eval)
 
     # ------------------------------------------------------------------
     # Comparison table
@@ -314,18 +396,37 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
     tir_correct, tir_total = read_accuracy(tir_records)
     cot_acc = cot_correct / cot_total if cot_total else 0.0
     tir_acc = tir_correct / tir_total if tir_total else 0.0
-    delta   = tir_acc - cot_acc
+
+    models = [
+        ("CoT",     cot_correct, cot_total, cot_acc),
+        ("TIR",     tir_correct, tir_total, tir_acc),
+    ]
+
+    if args.oss:
+        oss_file = oss_results / f"final_{args.dataset}.jsonl"
+        oss_records = read_results(oss_file)
+        oss_correct, oss_total = read_accuracy(oss_records)
+        oss_acc = oss_correct / oss_total if oss_total else 0.0
+        models.append(("TIR+OSS", oss_correct, oss_total, oss_acc))
 
     print(f"\n{'='*60}")
     print(f"RESULTS — {args.dataset.upper()}  (n_train={args.n}, epochs={args.epochs})")
     print(f"{'='*60}")
-    print(f"{'Model':<8}  {'Correct':>8}  {'Total':>8}  {'Accuracy':>10}")
-    print(f"{'─'*44}")
-    print(f"{'CoT':<8}  {cot_correct:>8}  {cot_total:>8}  {cot_acc:>9.1%}")
-    print(f"{'TIR':<8}  {tir_correct:>8}  {tir_total:>8}  {tir_acc:>9.1%}")
-    print(f"{'─'*44}")
-    sign = "+" if delta >= 0 else ""
-    print(f"{'Δ (TIR−CoT)':<20}  {sign}{delta:.1%}")
+    print(f"{'Model':<10}  {'Correct':>8}  {'Total':>8}  {'Accuracy':>10}")
+    print(f"{'─'*46}")
+    for name, corr, tot, acc in models:
+        print(f"{name:<10}  {corr:>8}  {tot:>8}  {acc:>9.1%}")
+    print(f"{'─'*46}")
+    delta_tir = tir_acc - cot_acc
+    sign = "+" if delta_tir >= 0 else ""
+    print(f"{'Δ (TIR−CoT)':<22}  {sign}{delta_tir:.1%}")
+    if args.oss:
+        delta_oss = oss_acc - cot_acc
+        sign = "+" if delta_oss >= 0 else ""
+        print(f"{'Δ (TIR+OSS−CoT)':<22}  {sign}{delta_oss:.1%}")
+        delta_oss_tir = oss_acc - tir_acc
+        sign = "+" if delta_oss_tir >= 0 else ""
+        print(f"{'Δ (TIR+OSS−TIR)':<22}  {sign}{delta_oss_tir:.1%}")
     print(f"{'='*60}")
     if args.wandb_project:
         print(f"\nW&B group '{group}' in project '{args.wandb_project}'")
@@ -340,6 +441,9 @@ def _run_experiment(args: argparse.Namespace, python: str, root: Path, log_file)
     save_trajectories(cot_records, traj_dir, prefix="cot", seed=args.seed)
     print("TIR:")
     save_trajectories(tir_records, traj_dir, prefix="tir", seed=args.seed)
+    if args.oss:
+        print("TIR+OSS:")
+        save_trajectories(oss_records, traj_dir, prefix="tir_oss", seed=args.seed)
 
 
 if __name__ == "__main__":

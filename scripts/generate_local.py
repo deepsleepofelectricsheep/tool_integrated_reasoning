@@ -65,6 +65,9 @@ def main() -> None:
     parser.add_argument("--code_timeout", type=int, default=None,
                         help="Seconds per code execution (default: 5 for gsm8k, 10 for math)")
     parser.add_argument("--model", type=str, default=MODEL_ID)
+    parser.add_argument("--do_sample", action="store_true", help="Enable nucleus sampling")
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--resume", action="store_true", help="Skip already-completed examples")
     args = parser.parse_args()
 
@@ -115,6 +118,9 @@ def main() -> None:
                 max_rounds=args.max_rounds,
                 max_new_tokens=args.max_new_tokens,
                 code_timeout=code_timeout,
+                do_sample=args.do_sample,
+                temperature=args.temperature,
+                top_p=args.top_p,
             )
 
             predicted = extract_boxed_answer(trajectory)

@@ -54,6 +54,9 @@ def generate_tir_trajectory(
     max_rounds: int = 3,
     max_new_tokens: int = 1024,
     code_timeout: int = 30,
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
 ) -> str:
     """Generate an interactive TIR trajectory for a single math problem.
 
@@ -79,6 +82,12 @@ def generate_tir_trajectory(
         input_ids = tokenizer(full_context, return_tensors="pt", add_special_tokens=False).input_ids.to(model.device)
         input_len = input_ids.shape[1]
 
+        sampling_kwargs = {}
+        if do_sample:
+            sampling_kwargs = dict(do_sample=True, temperature=temperature, top_p=top_p)
+        else:
+            sampling_kwargs = dict(do_sample=False)
+
         with torch.no_grad():
             out_ids = model.generate(
                 input_ids,
@@ -86,8 +95,8 @@ def generate_tir_trajectory(
                 stopping_criteria=StoppingCriteriaList(
                     [_StopAtOutputBlock(tokenizer, input_len)]
                 ),
-                do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
+                **sampling_kwargs,
             )
 
         new_text: str = tokenizer.decode(
